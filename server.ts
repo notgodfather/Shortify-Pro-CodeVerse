@@ -5,102 +5,152 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import { nanoid } from "nanoid";
-import { initializeApp, cert } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
-import fs from "fs";
-
-// Note: In this environment, we use the client config for admin SDK if needed, 
-// but usually we can just use the client SDK on the frontend.
-// However, the user asked for a full-stack app with REST APIs.
-// We'll use the client SDK on the frontend for analytics, 
-// but the backend will handle the shortening and redirection.
-
-// Since we don't have a service account key file, we'll use the client SDK 
-// or just proxy requests if possible. 
-// Actually, for a real full-stack app, we'd need admin access.
-// Let's assume we can use the client SDK on the backend too if needed, 
-// or just use the REST API of Firebase.
-// But wait, the instructions say "Always call Gemini API from the frontend... NEVER call Gemini API from the backend."
-// It doesn't say that about Firebase.
-
-// Let's try to use the client SDK on the backend for simplicity in this environment 
-// if we can't get admin credentials easily.
-// Actually, I'll implement the backend logic using the client SDK for now 
-// as it's easier to set up with the provided config.
 
 import { initializeApp as initializeClientApp } from "firebase/app";
-import { getFirestore as getClientFirestore, collection, addDoc, query, where, getDocs, updateDoc, doc, increment, getDoc, serverTimestamp, deleteDoc } from "firebase/firestore";
+import {
+  getFirestore as getClientFirestore,
+  collection, addDoc, query, where, getDocs,
+  updateDoc, doc, increment, serverTimestamp, deleteDoc,
+} from "firebase/firestore";
 import firebaseConfig from "./firebase-applet-config.json";
 
 const clientApp = initializeClientApp(firebaseConfig);
 const db = getClientFirestore(clientApp, firebaseConfig.firestoreDatabaseId);
 
+// ─── Simple in-memory rate limiter ──────────────────────────────────────────
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function rateLimit(ip: string, maxRequests: number, windowMs: number): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || entry.resetAt < now) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + windowMs });
+    return false; // not limited
+  }
+  entry.count++;
+  return entry.count > maxRequests;
+}
+
+// ─── URL security validator ──────────────────────────────────────────────────
+const BLOCKED_SCHEMES = ["javascript:", "data:", "vbscript:", "file:", "blob:"];
+
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const scheme = parsed.protocol.toLowerCase();
+    if (BLOCKED_SCHEMES.some(b => scheme.startsWith(b.replace(":", "")))) return false;
+    return scheme === "http:" || scheme === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// ─── Short ID regex ──────────────────────────────────────────────────────────
+const SHORT_ID_RE = /^[a-zA-Z0-9_-]{3,20}$/;
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(cors());
-  app.use(helmet({
-    contentSecurityPolicy: false, // Disable for development/iframe compatibility
-  }));
+  app.use(cors({ origin: true, credentials: true }));
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,           // Disabled for dev/Vite compat
+      crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }, // Required for Firebase popup auth
+    })
+  );
   app.use(morgan("dev"));
-  app.use(express.json());
+  app.use(express.json({ limit: "10kb" })); // protect against large payloads
 
-  // Test Firestore connection
+  // ─── Firestore connection check ──────────────────────────────────────────
   try {
-    const testSnapshot = await getDocs(query(collection(db, "urls"), where("shortId", "==", "test-connection")));
-    console.log("Firestore connection successful.");
+    await getDocs(query(collection(db, "urls"), where("shortId", "==", "__test__")));
+    console.log("✅ Firestore connected.");
   } catch (error) {
-    console.error("Firestore connection failed. Please check your configuration.", error);
+    console.error("❌ Firestore connection failed:", error);
   }
 
-  // API: Shorten URL
+  // ─── API: Shorten URL ────────────────────────────────────────────────────
   app.post("/api/shorten", async (req, res) => {
-    const { originalUrl, category, customShortId, expiryDate, aiInsights, campaignId } = req.body;
+    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
+    if (rateLimit(ip, 30, 60_000)) {
+      return res.status(429).json({ error: "Too many requests. Please slow down." });
+    }
 
-    if (!originalUrl || !originalUrl.startsWith("http")) {
-      return res.status(400).json({ error: "Invalid URL" });
+    const { originalUrl, category, customShortId, expiryDate, campaignId, nickname, userId } = req.body;
+
+    // Security: validate URL
+    if (!originalUrl || !isSafeUrl(originalUrl)) {
+      return res.status(400).json({ error: "Invalid or unsafe URL. Only http:// and https:// URLs are allowed." });
+    }
+
+    // Security: sanitize customShortId
+    if (customShortId && !/^[a-zA-Z0-9_-]{3,20}$/.test(customShortId)) {
+      return res.status(400).json({ error: "Custom ID must be 3–20 alphanumeric characters (hyphens/underscores allowed)." });
     }
 
     try {
-      // Check if custom shortId is already taken
-      if (customShortId) {
-        const q = query(collection(db, "urls"), where("shortId", "==", customShortId));
-        const querySnapshot = await getDocs(q);
-        if (!querySnapshot.empty) {
-          return res.status(400).json({ error: "Custom short ID already taken" });
+      // ── Dedup: return existing short link if same URL + user already exists ──
+      if (!customShortId) {
+        const existingQ = userId
+          ? query(collection(db, "urls"), where("originalUrl", "==", originalUrl), where("userId", "==", userId))
+          : query(collection(db, "urls"), where("originalUrl", "==", originalUrl));
+        const existingSnap = await getDocs(existingQ);
+        if (!existingSnap.empty) {
+          const ex = existingSnap.docs[0];
+          const exData = ex.data();
+          console.log(`[Shorten] Returning existing shortId "${exData.shortId}" for URL: ${originalUrl}`);
+          return res.json({ id: ex.id, shortId: exData.shortId, originalUrl, category: exData.category, existing: true });
         }
       }
 
-      const shortId = customShortId || nanoid(5);
+      // Check if custom shortId is already taken
+      if (customShortId) {
+        const q = query(collection(db, "urls"), where("shortId", "==", customShortId));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          return res.status(400).json({ error: "Custom short ID already taken. Please choose another." });
+        }
+      }
+
+      const shortId = customShortId || nanoid(6);
       const urlDoc = {
         originalUrl,
         shortId,
         clickCount: 0,
-        clickHistory: [], // Array of timestamps
+        clickHistory: [],
         createdAt: serverTimestamp(),
         category: category || "General",
+        nickname: nickname?.trim() || null,
         expiryDate: expiryDate || null,
         campaignId: campaignId || null,
-        aiInsights: aiInsights || null, // { summary: string, safetyScore: number }
+        aiInsights: null,
+        userId: userId || null,
       };
 
       const docRef = await addDoc(collection(db, "urls"), urlDoc);
-      res.json({ id: docRef.id, ...urlDoc, shortId });
+      res.json({ id: docRef.id, shortId, originalUrl, category: urlDoc.category, nickname: urlDoc.nickname });
     } catch (error) {
       console.error("Error shortening URL:", error);
-      res.status(500).json({ error: "Failed to shorten URL" });
+      res.status(500).json({ error: "Failed to shorten URL. Please try again." });
     }
   });
 
-  // API: Get all URLs
+  // ─── API: Get all URLs (optionally filter by userId) ────────────────────
   app.get("/api/urls", async (req, res) => {
     try {
-      const querySnapshot = await getDocs(collection(db, "urls"));
-      const urls = querySnapshot.docs.map(doc => {
-        const data = doc.data();
+      const { userId } = req.query;
+      let q;
+      if (userId && typeof userId === "string") {
+        q = query(collection(db, "urls"), where("userId", "==", userId));
+      } else {
+        q = collection(db, "urls");
+      }
+      const snapshot = await getDocs(q);
+      const urls = snapshot.docs.map(d => {
+        const data = d.data() as Record<string, any>;
         return {
-          id: doc.id,
+          id: d.id,
           ...data,
           createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
           clickHistory: data.clickHistory || [],
@@ -109,111 +159,159 @@ async function startServer() {
       res.json(urls);
     } catch (error) {
       console.error("Error fetching URLs:", error);
-      res.status(500).json({ error: "Failed to fetch URLs" });
+      res.status(500).json({ error: "Failed to fetch URLs." });
     }
   });
 
-  // API: Update URL
+  // ─── API: Update URL ─────────────────────────────────────────────────────
   app.patch("/api/urls/:id", async (req, res) => {
     const { id } = req.params;
-    const updates = req.body;
-
+    const ALLOWED_FIELDS = ["category", "nickname", "expiryDate", "aiInsights", "campaignId"];
+    const updates = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => ALLOWED_FIELDS.includes(k))
+    );
     try {
-      const docRef = doc(db, "urls", id);
-      await updateDoc(docRef, updates);
+      await updateDoc(doc(db, "urls", id), updates);
       res.json({ success: true });
     } catch (error) {
       console.error("Error updating URL:", error);
-      res.status(500).json({ error: "Failed to update URL" });
+      res.status(500).json({ error: "Failed to update URL." });
     }
   });
 
-  // API: Delete URL
+  // ─── API: Delete URL ─────────────────────────────────────────────────────
   app.delete("/api/urls/:id", async (req, res) => {
     const { id } = req.params;
     try {
-      const docRef = doc(db, "urls", id);
-      await deleteDoc(docRef);
+      await deleteDoc(doc(db, "urls", id));
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting URL:", error);
-      res.status(500).json({ error: "Failed to delete URL" });
+      res.status(500).json({ error: "Failed to delete URL." });
     }
   });
 
-  // API: Campaigns
+  // ─── API: Get Campaigns ──────────────────────────────────────────────────
   app.get("/api/campaigns", async (req, res) => {
     try {
-      const querySnapshot = await getDocs(collection(db, "campaigns"));
-      const campaigns = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
-      }));
+      const { userId } = req.query;
+      let q;
+      if (userId && typeof userId === "string") {
+        q = query(collection(db, "campaigns"), where("userId", "==", userId));
+      } else {
+        q = collection(db, "campaigns");
+      }
+      const snapshot = await getDocs(q);
+      const campaigns = snapshot.docs.map(d => {
+        const data = d.data() as Record<string, any>;
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+        };
+      });
       res.json(campaigns);
     } catch (error) {
       console.error("Error fetching campaigns:", error);
-      res.status(500).json({ error: "Failed to fetch campaigns" });
+      res.status(500).json({ error: "Failed to fetch campaigns." });
     }
   });
 
+  // ─── API: Create Campaign ────────────────────────────────────────────────
   app.post("/api/campaigns", async (req, res) => {
-    const { name, description, status } = req.body;
+    const { name, description, status, userId } = req.body;
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ error: "Campaign name is required." });
+    }
     try {
       const campaignDoc = {
-        name,
-        description: description || "",
+        name: name.trim().slice(0, 100), // cap length
+        description: (description || "").slice(0, 500),
         status: status || "active",
         createdAt: serverTimestamp(),
+        userId: userId || null,
       };
       const docRef = await addDoc(collection(db, "campaigns"), campaignDoc);
       res.json({ id: docRef.id, ...campaignDoc });
     } catch (error) {
       console.error("Error creating campaign:", error);
-      res.status(500).json({ error: "Failed to create campaign" });
+      res.status(500).json({ error: "Failed to create campaign." });
     }
   });
 
-  // Redirection: GET /:shortId
-  app.get("/:shortId", async (req, res) => {
+  // ─── SHORT URL REDIRECT (:shortId) ──────────────────────────────────────
+  // IMPORTANT: This MUST be registered BEFORE vite.middlewares.
+  // In SPA/middlewareMode, Vite intercepts ALL browser HTML requests and
+  // returns index.html — the redirect would never fire if Vite came first.
+  app.get("/:shortId", async (req, res, next) => {
     const { shortId } = req.params;
 
-    if (shortId.startsWith("api") || shortId.includes(".")) {
-      return;
+    // Pass through anything that isn't a valid short ID format
+    if (
+      !SHORT_ID_RE.test(shortId) ||
+      shortId.startsWith("@") ||
+      shortId.startsWith("_") ||
+      shortId.startsWith("src") ||
+      shortId.startsWith("api") ||
+      shortId.startsWith("node_modules") ||
+      shortId.includes(".")
+    ) {
+      return next();
     }
 
     try {
+      console.log(`[Redirect] Looking up shortId: "${shortId}"`);
       const q = query(collection(db, "urls"), where("shortId", "==", shortId));
-      const querySnapshot = await getDocs(q);
+      const snapshot = await getDocs(q);
+      console.log(`[Redirect] Found ${snapshot.size} doc(s) for shortId: "${shortId}"`);
 
-      if (querySnapshot.empty) {
-        return res.status(404).send("URL not found");
+      if (snapshot.empty) {
+        // Show a proper 404 page — do NOT call next() which would serve React
+        // and confusingly show the login page for every broken/unknown link.
+        return res.status(404).send(`
+          <!DOCTYPE html><html><head>
+            <title>Link Not Found – Shortify Pro</title>
+            <meta charset="utf-8">
+            <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8f9fa;color:#1a1a2e}.box{text-align:center;padding:3rem;background:#fff;border-radius:1.5rem;box-shadow:0 4px 40px rgba(0,0,0,.08);max-width:400px}.icon{font-size:4rem;margin-bottom:1rem}.title{font-size:1.75rem;font-weight:800;margin-bottom:.5rem}.sub{color:#666;margin-bottom:1.5rem;font-size:.95rem}.btn{display:inline-block;background:#6c63ff;color:#fff;padding:.75rem 2rem;border-radius:.75rem;text-decoration:none;font-weight:700;transition:opacity .2s}.btn:hover{opacity:.85}</style>
+          </head><body><div class="box">
+            <div class="icon">🔍</div>
+            <h1 class="title">Link Not Found</h1>
+            <p class="sub">The short link <strong>/${shortId}</strong> doesn't exist or may have been deleted.</p>
+            <a class="btn" href="/">← Go to Shortify Pro</a>
+          </div></body></html>
+        `);
       }
 
-      const urlDoc = querySnapshot.docs[0];
+      const urlDoc = snapshot.docs[0];
       const data = urlDoc.data();
 
       // Check expiry
       if (data.expiryDate && new Date(data.expiryDate) < new Date()) {
-        return res.status(410).send("This link has expired.");
+        return res.status(410).send(`
+          <html><head><title>Link Expired</title></head>
+          <body style="font-family:sans-serif;text-align:center;padding:60px">
+            <h1>⏰ This link has expired</h1>
+            <p>The short link you followed is no longer active.</p>
+            <a href="/">Go to Shortify Pro</a>
+          </body></html>
+        `);
       }
 
-      const originalUrl = data.originalUrl;
-
-      // Increment click count and add to history
-      await updateDoc(doc(db, "urls", urlDoc.id), {
+      // Track click non-blocking so redirect is instant
+      updateDoc(doc(db, "urls", urlDoc.id), {
         clickCount: increment(1),
-        clickHistory: [...(data.clickHistory || []), new Date().toISOString()]
-      });
+        clickHistory: [...(data.clickHistory || []), new Date().toISOString()],
+      }).catch(err => console.error("Click tracking error:", err));
 
-      res.redirect(originalUrl);
+      // 302 = temporary redirect; every visit hits the server (enables analytics)
+      return res.redirect(302, data.originalUrl);
     } catch (error) {
-      console.error("Error redirecting:", error);
-      res.status(500).send("Internal Server Error");
+      console.error("Redirect error:", error);
+      return res.status(500).send("Internal Server Error");
     }
   });
 
-  // Vite middleware for development
+  // ─── Vite Dev Middleware (SPA) — must come AFTER /:shortId ──────────────
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -223,13 +321,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*all", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`✅ Server running → http://localhost:${PORT}`);
   });
 }
 
