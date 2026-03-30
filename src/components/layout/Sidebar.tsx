@@ -12,7 +12,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ activeTab, onTabChange, mobileOpen = false, onMobileClose }: SidebarProps) {
-  const { logout, isDemoUser } = useAuth();
+  const { user, logout, isDemoUser } = useAuth();
 
   const navItems = [
     { icon: LayoutDashboard, label: "Dashboard" as NavTab },
@@ -29,45 +29,39 @@ export default function Sidebar({ activeTab, onTabChange, mobileOpen = false, on
   const handleLogout = async () => {
     onMobileClose?.();
     await logout();
-    toast.success(isDemoUser ? "Exited demo mode." : "Signed out successfully.");
+    toast.success("Signed out successfully.");
   };
 
-  const SidebarContent = () => (
-    <nav className="flex flex-col gap-1 h-full">
-      {/* Nav items */}
-      <div className="flex flex-col gap-1 flex-1">
-        {navItems.map((item) => (
-          <motion.button
-            key={item.label}
-            onClick={() => handleTabChange(item.label)}
-            whileHover={{ x: 4 }}
-            whileTap={{ scale: 0.97 }}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-sans text-sm font-medium transition-all duration-200 w-full text-left ${
-              activeTab === item.label
-                ? "bg-primary/10 text-primary"
-                : "text-on-surface-variant hover:bg-surface-container-highest"
-            }`}
-          >
-            <item.icon size={18} strokeWidth={activeTab === item.label ? 2.5 : 2} />
-            {item.label}
-          </motion.button>
-        ))}
-      </div>
-
-      {/* Sign Out — pinned to bottom */}
-      <div className="pt-4 mt-auto border-t border-outline-variant/10">
+  const NavItems = () => (
+    <nav className="flex flex-col gap-1">
+      {navItems.map((item) => (
         <motion.button
-          onClick={handleLogout}
+          key={item.label}
+          onClick={() => handleTabChange(item.label)}
           whileHover={{ x: 4 }}
           whileTap={{ scale: 0.97 }}
-          id="sidebar-logout-btn"
-          className="flex items-center gap-3 px-4 py-3 rounded-xl font-sans text-sm font-medium transition-all duration-200 w-full text-left text-red-500/80 hover:bg-red-500/10 hover:text-red-500"
+          className={`flex items-center gap-3 px-4 py-3 rounded-xl font-sans text-sm font-medium transition-all duration-200 w-full text-left ${
+            activeTab === item.label
+              ? "bg-primary/10 text-primary"
+              : "text-on-surface-variant hover:bg-surface-container-highest"
+          }`}
         >
-          <LogOut size={18} strokeWidth={2} />
-          {isDemoUser ? "Exit Demo" : "Sign Out"}
+          <item.icon size={18} strokeWidth={activeTab === item.label ? 2.5 : 2} />
+          {item.label}
         </motion.button>
-      </div>
+      ))}
     </nav>
+  );
+
+  const LogoutButton = ({ className = "" }: { className?: string }) => (
+    <button
+      id="sidebar-logout-btn"
+      onClick={handleLogout}
+      className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold text-red-500 hover:bg-red-500/10 transition-colors w-full text-left ${className}`}
+    >
+      <LogOut size={18} />
+      {isDemoUser ? "Exit Demo" : "Sign Out"}
+    </button>
   );
 
   return (
@@ -77,7 +71,12 @@ export default function Sidebar({ activeTab, onTabChange, mobileOpen = false, on
         <div className="mb-6 px-2">
           <div className="text-xs font-bold text-on-surface-variant/40 uppercase tracking-widest">Navigation</div>
         </div>
-        <SidebarContent />
+        <NavItems />
+
+        {/* Logout at bottom of desktop sidebar */}
+        <div className="mt-auto pt-4 border-t border-outline-variant/10">
+          <LogoutButton />
+        </div>
       </aside>
 
       {/* Mobile drawer overlay */}
@@ -101,6 +100,7 @@ export default function Sidebar({ activeTab, onTabChange, mobileOpen = false, on
               transition={{ type: "spring", stiffness: 300, damping: 30 }}
               className="lg:hidden fixed top-0 left-0 h-full w-72 bg-surface p-6 z-50 shadow-2xl flex flex-col"
             >
+              {/* Drawer header */}
               <div className="flex items-center justify-between mb-8">
                 <div className="text-xl font-black text-primary">Shortify Pro</div>
                 <button
@@ -110,8 +110,30 @@ export default function Sidebar({ activeTab, onTabChange, mobileOpen = false, on
                   <X size={20} />
                 </button>
               </div>
-              <div className="flex-1 flex flex-col">
-                <SidebarContent />
+
+              {/* Nav links */}
+              <NavItems />
+
+              {/* User info + Logout at bottom of drawer */}
+              <div className="mt-auto pt-4 border-t border-outline-variant/10 space-y-1">
+                {user && (
+                  <div className="flex items-center gap-3 px-4 py-3 mb-1">
+                    <div className="w-8 h-8 rounded-xl overflow-hidden bg-primary/10 flex items-center justify-center flex-shrink-0">
+                      {user.photoURL ? (
+                        <img src={user.photoURL} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      ) : (
+                        <span className="font-black text-primary text-sm">{(user.displayName?.[0] ?? "U").toUpperCase()}</span>
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-on-surface truncate">{user.displayName}</p>
+                      <p className={`text-[10px] font-bold uppercase tracking-wider ${isDemoUser ? "text-amber-600" : "text-primary"}`}>
+                        {isDemoUser ? "Demo Mode" : "Pro Member"}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <LogoutButton />
               </div>
             </motion.aside>
           </>

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { useAuth } from "../contexts/AuthContext";
 
 export default function LoginPage() {
-  const { signInWithGoogle, enterDemoMode, authError } = useAuth();
+  const { signInWithGoogle, enterDemo, authError } = useAuth();
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -21,8 +21,7 @@ export default function LoginPage() {
   };
 
   const handleDemoEnter = () => {
-    setLocalError(null);
-    enterDemoMode();
+    enterDemo();
   };
 
   const displayError = localError || authError;
@@ -64,7 +63,7 @@ export default function LoginPage() {
         >
           <h2 className="text-2xl font-bold text-on-surface mb-2">Get Started</h2>
           <p className="text-sm text-on-surface-variant mb-8">
-            Sign in with Google to create and manage your short links.
+            Explore with a demo or sign in with Google to manage your own short links.
           </p>
 
           {/* Features */}
@@ -123,25 +122,23 @@ export default function LoginPage() {
           <motion.button
             id="demo-enter-btn"
             onClick={handleDemoEnter}
-            whileHover={{ scale: 1.015 }}
+            whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.97 }}
-            className="w-full flex items-center justify-center gap-3 bg-primary/8 border-2 border-primary/30 text-primary py-4 rounded-2xl font-bold text-base hover:bg-primary/15 hover:border-primary/50 active:scale-[0.98] transition-all mb-3"
+            className="w-full flex items-center justify-center gap-3 bg-primary/10 text-primary border border-primary/30 py-4 rounded-2xl font-bold text-base hover:bg-primary/15 active:scale-[0.98] transition-all shadow-sm mb-3"
           >
             <FlaskConical size={20} />
             Enter Demo
           </motion.button>
 
-          {/* Subtext for demo button */}
-          <p className="text-[11px] text-on-surface-variant/55 text-center mb-6 leading-relaxed px-2">
+          {/* Demo subtext */}
+          <p className="text-[11px] text-on-surface-variant/50 text-center mb-6 leading-relaxed">
             (Test mode for judges to evaluate using pre-configured links and campaigns)
           </p>
 
           {/* Divider */}
           <div className="flex items-center gap-3 mb-6">
             <div className="flex-1 h-px bg-outline-variant/20" />
-            <span className="text-[11px] font-bold text-on-surface-variant/40 uppercase tracking-widest">
-              or
-            </span>
+            <span className="text-[11px] font-bold text-on-surface-variant/40 uppercase tracking-wider">or</span>
             <div className="flex-1 h-px bg-outline-variant/20" />
           </div>
 

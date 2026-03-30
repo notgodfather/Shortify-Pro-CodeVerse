@@ -24,7 +24,7 @@ interface RecentLinksProps {
 }
 
 export default function RecentLinks({ onRefresh, showOnlyAnalytics = false, globalSearch = "" }: RecentLinksProps) {
-  const { user } = useAuth();
+  const { user, fetchUserId } = useAuth();
   const [links, setLinks] = useState<UrlData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export default function RecentLinks({ onRefresh, showOnlyAnalytics = false, glob
   const loadLinks = async () => {
     try {
       setError(null);
-      const data = await fetchUrls(user?.uid);
+      const data = await fetchUrls(fetchUserId);
       setLinks(data);
     } catch (err: any) {
       console.error("Error fetching links:", err);
@@ -53,7 +53,7 @@ export default function RecentLinks({ onRefresh, showOnlyAnalytics = false, glob
     loadLinks();
     const interval = setInterval(loadLinks, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchUserId]);
 
   const handleDelete = async (id: string) => {
     try {
@@ -156,37 +156,37 @@ export default function RecentLinks({ onRefresh, showOnlyAnalytics = false, glob
     <div className="space-y-6">
       {/* Dashboard Header / Stats */}
       {!showOnlyAnalytics && !globalSearch && (
-        <div className="grid grid-cols-3 gap-3 mb-6">
-          <div className="bg-surface-container-lowest px-4 py-3 rounded-2xl border border-outline-variant/10 shadow-sm flex items-center gap-3">
-            <div className="bg-blue-500/10 p-1.5 rounded-lg text-blue-500 flex-shrink-0">
-              <MousePointer2 size={16} />
-            </div>
-            <div>
-              <div className="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-wider">Total Clicks</div>
-              <div className="text-xl font-bold leading-tight">{links.reduce((acc, curr) => acc + curr.clickCount, 0)}</div>
-            </div>
-          </div>
-          <div className="bg-surface-container-lowest px-4 py-3 rounded-2xl border border-outline-variant/10 shadow-sm flex items-center gap-3">
-            <div className="bg-green-500/10 p-1.5 rounded-lg text-green-500 flex-shrink-0">
-              <TrendingUp size={16} />
-            </div>
-            <div>
-              <div className="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-wider">Active Links</div>
-              <div className="text-xl font-bold leading-tight">{links.length}</div>
-            </div>
-          </div>
-          <div className="bg-surface-container-lowest px-4 py-3 rounded-2xl border border-outline-variant/10 shadow-sm flex items-center gap-3">
-            <div className="bg-purple-500/10 p-1.5 rounded-lg text-purple-500 flex-shrink-0">
-              <Tag size={16} />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-wider">Top Category</div>
-              <div className="text-xl font-bold leading-tight truncate">
-                {Object.entries(links.reduce((acc: any, curr) => {
-                  acc[curr.category] = (acc[curr.category] || 0) + 1;
-                  return acc;
-                }, {})).sort((a: any, b: any) => b[1] - a[1])[0]?.[0] || "None"}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/10 shadow-sm">
+            <div className="flex items-center gap-4 mb-2">
+              <div className="bg-blue-500/10 p-2 rounded-lg text-blue-500">
+                <MousePointer2 size={20} />
               </div>
+              <span className="text-sm font-bold text-on-surface-variant/60 uppercase">Total Clicks</span>
+            </div>
+            <div className="text-3xl font-bold">{links.reduce((acc, curr) => acc + curr.clickCount, 0)}</div>
+          </div>
+          <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/10 shadow-sm">
+            <div className="flex items-center gap-4 mb-2">
+              <div className="bg-green-500/10 p-2 rounded-lg text-green-500">
+                <TrendingUp size={20} />
+              </div>
+              <span className="text-sm font-bold text-on-surface-variant/60 uppercase">Active Links</span>
+            </div>
+            <div className="text-3xl font-bold">{links.length}</div>
+          </div>
+          <div className="bg-surface-container-lowest p-6 rounded-3xl border border-outline-variant/10 shadow-sm">
+            <div className="flex items-center gap-4 mb-2">
+              <div className="bg-purple-500/10 p-2 rounded-lg text-purple-500">
+                <Tag size={20} />
+              </div>
+              <span className="text-sm font-bold text-on-surface-variant/60 uppercase">Top Category</span>
+            </div>
+            <div className="text-3xl font-bold">
+              {Object.entries(links.reduce((acc: any, curr) => {
+                acc[curr.category] = (acc[curr.category] || 0) + 1;
+                return acc;
+              }, {})).sort((a: any, b: any) => b[1] - a[1])[0]?.[0] || "None"}
             </div>
           </div>
         </div>
